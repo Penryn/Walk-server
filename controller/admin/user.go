@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"fmt"
 	"sort"
 	"time"
 	"walk-server/constant"
@@ -167,69 +166,77 @@ func GetTimeoutUsers(c *gin.Context) {
 		return
 	}
 
+	// 获取超时队伍和成员信息（一次性查询）
+	type TeamWithMembers struct {
+		model.Team
+		Person model.Person `gorm:"embedded"`
+	}
+	var teamsWithMembers []TeamWithMembers
+
+	// 构建基础查询
+	query := global.DB.Model(&model.Team{}).
+		Select("teams.*, people.*").
+		Joins("JOIN people ON people.team_id = teams.id").
+		Where("teams.route = ?", postForm.Route)
+
 	// 获取超时队伍
-	teamMap, err := adminService.GetTimeoutTeams(postForm.Minute, postForm.Route)
-	if err != nil {
+	duration := time.Duration(postForm.Minute) * time.Minute
+	timeoutQuery := query.Where("teams.time < ? AND teams.status NOT IN (4, 1)", time.Now().Add(-duration))
+	if err := timeoutQuery.Find(&teamsWithMembers).Error; err != nil {
 		utility.ResponseError(c, "获取失败，请稍后重试")
 		return
 	}
 
 	// 获取未到队伍
-	noShowTeams, err := adminService.GetNoShowTeams(postForm.Route)
-	if err != nil {
+	var noShowTeamsWithMembers []TeamWithMembers
+	noShowQuery := query.Where("teams.status = 1 AND teams.submit = 1")
+	if err := noShowQuery.Find(&noShowTeamsWithMembers).Error; err != nil {
 		utility.ResponseError(c, "获取失败，请稍后重试")
 		return
 	}
 
-	results := make([]PointUsers, 0, len(teamMap)) // 按 teamMap 的长度预分配空间
+	// 处理结果
+	results := make([]PointUsers, 0)
+	teamMap := make(map[int8][]User)
+	noShowUsers := make([]User, 0)
 
-	for point, teams := range teamMap {
-		users := make([]User, 0, len(teams)*6) // 按 teams 的长度预分配空间
-		for _, team := range teams {
-			person, persons := model.GetPersonsInTeam(int(team.ID))
-
-			// 筛选成员
-			filteredUsers := make([]User, 0, 6)
-			switch postForm.Type {
-			case 0:
-				filteredUsers = append(filteredUsers, buildUserData(person, team))
-				for _, member := range persons {
-					filteredUsers = append(filteredUsers, buildUserData(member, team))
-				}
-			case 1, 2, 3:
-				filteredUsers = append(filteredUsers, filterMembersByType(person, persons, postForm.Type, team)...)
-			}
-
-			users = append(users, filteredUsers...)
+	// 处理超时队伍
+	for _, tm := range teamsWithMembers {
+		user := buildUserData(tm.Person, tm.Team)
+		if postForm.Type == 0 || user.Type == postForm.Type {
+			teamMap[tm.Point] = append(teamMap[tm.Point], user)
 		}
-		// 存入有序结构
-		results = append(results, PointUsers{Point: point, Location: constant.GetPointName(postForm.Route, point), Users: users})
-
 	}
-	users := make([]User, 0, len(noShowTeams)*4) // 按 teams 的长度预分配空间
-	for _, team := range noShowTeams {
-		person, persons := model.GetPersonsInTeam(int(team.ID))
 
-		// 筛选成员
-		filteredUsers := make([]User, 0, 6)
-		switch postForm.Type {
-		case 0:
-			filteredUsers = append(filteredUsers, buildUserData(person, team))
-			for _, member := range persons {
-				filteredUsers = append(filteredUsers, buildUserData(member, team))
-			}
-		case 1, 2, 3:
-			filteredUsers = append(filteredUsers, filterMembersByType(person, persons, postForm.Type, team)...)
+	// 处理未到队伍
+	for _, tm := range noShowTeamsWithMembers {
+		user := buildUserData(tm.Person, tm.Team)
+		if postForm.Type == 0 || user.Type == postForm.Type {
+			noShowUsers = append(noShowUsers, user)
 		}
-
-		users = append(users, filteredUsers...)
 	}
-	results = append(results, PointUsers{Point: -1, Location: "未到", Users: users})
 
-	// 按 `point` 排序，保证顺序
+	// 构建结果
+	for point, users := range teamMap {
+		results = append(results, PointUsers{
+			Point:    point,
+			Location: constant.GetPointName(postForm.Route, point),
+			Users:    users,
+		})
+	}
+
+	// 添加未到队伍
+	if len(noShowUsers) > 0 {
+		results = append(results, PointUsers{
+			Point:    -1,
+			Location: "未到",
+			Users:    noShowUsers,
+		})
+	}
+
+	// 按点位排序
 	sort.Slice(results, func(i, j int) bool { return results[i].Point < results[j].Point })
 
-	// 返回成功的响应，包含用户信息
 	utility.ResponseSuccess(c, gin.H{
 		"results": results,
 	})
@@ -253,27 +260,38 @@ func DownloadTimeoutUsers(c *gin.Context) {
 		return
 	}
 
-	// 获取用户信息（有序）
-	var allUsers []User // 所有用户
-	var genderMap = map[int8]string{1: "男", 2: "女"}
-	var campusMap = map[uint8]string{1: "朝晖", 2: "屏峰", 3: "莫干山"}
-	var typeMap = map[uint8]string{1: "学生", 2: "教职工", 3: "校友"}
-	var statusMap = map[uint8]string{1: "队员", 2: "队长"}
-	var walkStatusMap = map[uint8]string{1: "未开始", 2: "进行中", 3: "进行中", 4: "放弃", 5: "已完成"}
+	// 预定义映射表
+	var (
+		genderMap     = map[int8]string{1: "男", 2: "女"}
+		campusMap     = map[uint8]string{1: "朝晖", 2: "屏峰", 3: "莫干山"}
+		typeMap       = map[uint8]string{1: "学生", 2: "教职工", 3: "校友"}
+		statusMap     = map[uint8]string{1: "队员", 2: "队长"}
+		walkStatusMap = map[uint8]string{1: "未开始", 2: "进行中", 3: "进行中", 4: "放弃", 5: "已完成"}
+	)
 
+	// 预分配切片容量
 	point := constant.PointMap[postForm.Route]
-	var i uint8
-	var teams []model.Team
-	for i = 0; i < point; i++ {
-		if _, exists := teamMap[int8(i)]; exists {
-			teams = teamMap[int8(i)]
-		} else {
+	headers := []string{"上个点位", "上个点位签到时间", "队伍编号", "队伍名称", "姓名", "队伍担当", "当前状态", "性别", "学号", "电话", "校区", "学院", "参与者类型"}
+
+	// 使用 map 预分配容量
+	pointUserMap := make(map[string][][]any, point)
+	points := make([]string, 0, point)
+
+	// 处理每个点位的队伍
+	for i := uint8(0); i < point; i++ {
+		teams, exists := teamMap[int8(i)]
+		if !exists {
 			continue
 		}
+
+		pointName := constant.GetPointName(postForm.Route, int8(i))
+		pointUserMap[pointName] = make([][]any, 0, len(teams)*6)
+		points = append(points, pointName)
+
 		for _, team := range teams {
 			person, persons := model.GetPersonsInTeam(int(team.ID))
 
-			// 筛选成员
+			// 根据类型筛选成员
 			var filteredUsers []User
 			switch postForm.Type {
 			case 0:
@@ -285,51 +303,45 @@ func DownloadTimeoutUsers(c *gin.Context) {
 				filteredUsers = append(filteredUsers, filterMembersByType(person, persons, postForm.Type, team)...)
 			}
 
-			allUsers = append(allUsers, filteredUsers...)
+			// 直接构建行数据并添加到对应点位的切片中
+			for _, user := range filteredUsers {
+				row := []any{
+					pointName,                       // 上个点位
+					user.Time.Format(time.DateTime), // 到达上个点位时间
+					user.TeamID,                     // 队伍编号
+					user.TeamName,                   // 队伍名称
+					user.Name,                       // 姓名
+					statusMap[user.Status],          // 队伍担当
+					walkStatusMap[user.WalkStatus],  // 当前状态
+					genderMap[user.Gender],          // 性别
+					user.StuId,                      // 学号
+					user.Tel,                        // 电话
+					campusMap[user.Campus],          // 校区
+					user.College,                    // 学院
+					typeMap[user.Type],              // 类型
+				}
+				pointUserMap[pointName] = append(pointUserMap[pointName], row)
+			}
 		}
 	}
 
-	// 构建表头
-	headers := []string{"上个点位", "上个点位签到时间", "队伍编号", "队伍名称", "姓名", "队伍担当", "当前状态", "性别", "学号", "电话", "校区", "学院", "参与者类型"}
-
-	// 构建所有用户的行
-
-	var rows [][]any
-	for _, user := range allUsers {
-		point := constant.GetPointName(postForm.Route, user.Point)
-
-		row := []any{
-			point,                                   // 上个点位
-			user.Time.Format("2006-01-02 15:04:05"), // 到达上个点位时间
-			user.TeamID,                             // 队伍编号
-			user.TeamName,                           // 队伍名称
-			user.Name,                               // 姓名
-			statusMap[user.Status],                  // 队伍担当
-			walkStatusMap[user.WalkStatus],          // 当前状态
-			genderMap[user.Gender],                  // 性别
-			user.StuId,                              // 学号
-			user.Tel,                                // 电话
-			campusMap[user.Campus],                  // 校区
-			user.College,                            // 学院
-			typeMap[user.Type],                      // 类型
-		}
-		rows = append(rows, row)
+	// 构建工作表
+	sheets := make([]utility.Sheet, 0, len(points))
+	for _, point := range points {
+		sheets = append(sheets, utility.Sheet{
+			Name:    point,
+			Headers: headers,
+			Rows:    pointUserMap[point],
+		})
 	}
 
-	// 创建 Excel 文件
 	data := utility.File{
-		Sheets: []utility.Sheet{
-			{
-				Name:    "超时用户信息", // Sheet 名称
-				Headers: headers,
-				Rows:    rows,
-			},
-		},
+		Sheets: sheets,
 	}
 
 	// 保存为 Excel 文件
-	fileName := "Route" + fmt.Sprint(postForm.Route) + "TimeoutUser.xlsx"
-	filePath := "./file/" // 文件保存路径
+	fileName := constant.RouteMap[postForm.Route] + "路线未到人员名单.xlsx"
+	filePath := "./file/"
 	host := global.Config.GetString("frontend.url")
 	url, err := utility.CreateExcelFile(data, fileName, filePath, host)
 	if err != nil {

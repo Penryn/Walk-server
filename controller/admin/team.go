@@ -423,9 +423,9 @@ func Regroup(c *gin.Context) {
 		Password:   "123456",
 		AllowMatch: true,
 		Slogan:     "新的开始",
-		Point:      0,
+		Point:      -1,
 		Status:     1,
-		StartNum:   uint(len(persons)),
+		StartNum:   uint(0),
 		Num:        uint8(len(persons)),
 		Captain:    persons[0].OpenId,
 		Submit:     true,
@@ -801,6 +801,7 @@ func GetTeamBySecret(c *gin.Context) {
 			"gender":  member.Gender,
 			"open_id": member.OpenId,
 			"campus":  member.Campus,
+			"status":  member.Status,
 			"type":    member.Type,
 			"contact": gin.H{
 				"qq":     member.Qq,
@@ -823,6 +824,7 @@ func GetTeamBySecret(c *gin.Context) {
 			"status":      team.Status,
 			"start_num":   team.StartNum,
 			"code":        team.Code,
+			"submit":      team.Submit,
 		},
 		"member": memberData,
 	})

@@ -54,7 +54,7 @@ func MountRoutes(router *gin.Engine) {
 			teamApi.POST("/random-list", team.GetRandomList)                    // 随机获取开放随机组队的团队列表
 			teamApi.POST("/random-join", middleware.IsExpired, team.RandomJoin) // 通过随机列表加入团队
 			teamApi.POST("/create", team.CreateTeam)                            // 创建团队
-			teamApi.POST("/update", middleware.IsExpired, team.UpdateTeam)      // 修改队伍信息
+			teamApi.POST("/update", team.UpdateTeam)                            // 修改队伍信息
 			teamApi.POST("/join", team.JoinTeam)                                // 加入团队
 			teamApi.GET("/leave", middleware.IsExpired, team.LeaveTeam)         // 离开团队
 			teamApi.GET("/remove", middleware.IsExpired, team.RemoveMember)     // 移除队员
@@ -95,9 +95,12 @@ func MountRoutes(router *gin.Engine) {
 		adminApi.GET("/timeout", admin.GetTimeoutUsers)                                  // 获取超时未提交的用户
 		adminApi.GET("/timeout/download", admin.DownloadTimeoutUsers)                    // 下载超时未提交的用户
 		adminApi.GET("/team/status/secret", admin.GetTeamBySecret)                       // 通过密钥获取队伍信息
-		adminApi.POST("/test/create", admin.CreateTestTeams)                             // 创建测试队伍
-		adminApi.POST("/test/delete", admin.DeleteTestTeams)                             // 删除测试队伍
-		adminApi.POST("/test/update", admin.UpdateTestTeams)                             // 更新测试队伍
 		adminApi.POST("/route/create", admin.CreateRouteAdmin)                           // 创建路线管理员
+
+		if gin.IsDebugging() {
+			adminApi.POST("/test/create", admin.CreateTestTeams) // 创建测试队伍
+			adminApi.POST("/test/delete", admin.DeleteTestTeams) // 删除测试队伍
+			adminApi.POST("/test/update", admin.UpdateTestTeams) // 更新测试队伍
+		}
 	}
 }
